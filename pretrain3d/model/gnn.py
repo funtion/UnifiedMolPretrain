@@ -2,6 +2,7 @@ from numpy.lib.shape_base import _put_along_axis_dispatcher
 import torch
 from torch import nn
 from torch import random
+from torch.autograd import grad
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
 from pretrain3d.utils.features import get_atom_feature_dims, get_bond_feature_dims
 from pretrain3d.model.conv import (
@@ -340,8 +341,14 @@ class GNNet(nn.Module):
             batch.nf_ring.view(-1),
             batch.pos,
         )
+        pos.requires_grad_(True)
+
         x, attr_mask_index = self.node_embedding(x, mode=mode)
-        edge_attr = one_hot_bonds(edge_attr)
+        if edge_attr.dtype == torch.float32: # in 3D graph, the edge_attr is [dx, dy, dz], thus only need to pad the last dimension
+            assert edge_attr.shape[1] == 3
+            edge_attr = F.pad(edge_attr, (0, sum(get_bond_feature_dims()) - 3), "constant", 0)
+        else:
+            edge_attr = one_hot_bonds(edge_attr)
         edge_attr = self.encoder_edge(edge_attr)
         edge_attr = self.node_embedding.update_edge_feat(
             edge_attr, edge_index, attr_mask_index, mode=mode
@@ -397,6 +404,22 @@ class GNNet(nn.Module):
         pred_attrs = self.attr_decoder(x, mode=mode)
         if mode == "conf2mol":
             return pred_attrs, None, None, None
+
+        if mode == "ff":
+            # For force field, we don't use the pred pos.
+            # instead, we backprop the force to the pos.
+            grad_outputs = [torch.ones_like(pred_attrs)]
+            force = grad(
+                [pred_attrs],
+                [pos],
+                grad_outputs=grad_outputs,
+                create_graph=True,
+                retain_graph=True,
+            )
+
+            return pred_attrs, None, force[0], None
+
+
         return pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx
 
     def compute_loss(
@@ -415,8 +438,26 @@ class GNNet(nn.Module):
             return self.compute_mol2conf_loss(
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
             )
+        elif mode == "ff":
+            return self.compute_ff_loss(
+                pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
+            )
         else:
             raise NotImplementedError()
+    
+    def compute_ff_loss(
+        self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
+    ):
+        # The FF loss contains both energy and force loss
+
+        gt_energy = batch.energy
+        gt_force = batch.force
+        energy_loss = F.mse_loss(pred_attrs.squeeze(-1), gt_energy, reduction="mean")
+        force_loss = F.mse_loss(pos_predictions, gt_force, reduction="mean")
+
+        loss = energy_loss * args.energy_loss_weight + force_loss * args.force_loss_weight
+        return loss, dict(loss=loss.item(), energy_loss=energy_loss.item(), force_loss=force_loss.item())
+
 
     def compute_mask_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
@@ -667,6 +708,8 @@ class AtomEmbeddingwithMask(nn.Module):
             return self.conf2mol(x)
         elif mode == "raw":
             return self.mol2conf(x)
+        elif mode == "ff":
+            return self.mol2conf(x)
         else:
             raise NotImplementedError()
 
@@ -686,10 +729,12 @@ class AtomEmbeddingwithMask(nn.Module):
 
     def forward_attrs(self, x):
         x = one_hot_atoms(x)
+        if x.shape[1] < sum(get_atom_feature_dims()): # In 3D graph, we only have atom type, not other information
+            x = F.pad(x, (0, sum(get_atom_feature_dims()) - x.shape[1]))
         return self.encoder_node(x)
 
     def update_edge_feat(self, edge_attr, edge_index, attr_mask_index, mode="mask"):
-        if mode in ["raw", "mol2conf"]:
+        if mode in ["raw", "mol2conf", "ff"]:
             return edge_attr
         elif mode == "mask":
             src = edge_index[0]
@@ -730,6 +775,8 @@ class PosEmbeddingwithMask(nn.Module):
             pos = self.conf2mol(pos, last_pred, mask_idx)
         elif mode == "raw":
             pos = self.raw(pos, last_pred, mask_idx)
+        elif mode == "ff":
+            pos = self.conf2mol(pos, last_pred, mask_idx)
 
         extended_x = x + self.pos_embedding(pos)
         row = edge_index[0]

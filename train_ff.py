@@ -9,8 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 import random
-from pretrain3d.data.pcqm4m import PCQM4Mv2Dataset
-from pretrain3d.data.Qm9Dataset.dataset import Qm9Dataset
+from pretrain3d.data.md17 import MD17Dataset
 from pretrain3d.model.gnn import GNNet
 from torch.optim.lr_scheduler import LambdaLR
 from pretrain3d.utils.misc import WarmCosine, PreprocessBatch
@@ -81,34 +80,34 @@ def evaluate(model, device, loader, args, preprocessor, model_train=False):
     for step, batch in enumerate(tqdm(loader, desc="Valid Iteration", disable=args.disable_tqdm)):
         batch = batch.to(device)
         preprocessor.process(batch)
-        with torch.no_grad():
-            loss_accum = 0
-            for mode in args.tasks:
-                pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
-                if args.distributed:
-                    loss, loss_dict = model.module.compute_loss(
-                        pred_attrs,
-                        attr_mask_index,
-                        pos_predictions,
-                        pos_mask_idx,
-                        batch,
-                        args,
-                        mode=mode,
-                    )
-                else:
-                    loss, loss_dict = model.compute_loss(
-                        pred_attrs,
-                        attr_mask_index,
-                        pos_predictions,
-                        pos_mask_idx,
-                        batch,
-                        args,
-                        mode=mode,
-                    )
-                loss_accum = loss_accum + loss
-                for k, v in loss_dict.items():
-                    loss_accum_dict[f"{mode}_{k}"] += v
-            loss_accum_dict["loss"] += loss_accum.item()
+        # with torch.no_grad(): # we need grad for the force
+        loss_accum = 0
+        for mode in args.tasks:
+            pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
+            if args.distributed:
+                loss, loss_dict = model.module.compute_loss(
+                    pred_attrs,
+                    attr_mask_index,
+                    pos_predictions,
+                    pos_mask_idx,
+                    batch,
+                    args,
+                    mode=mode,
+                )
+            else:
+                loss, loss_dict = model.compute_loss(
+                    pred_attrs,
+                    attr_mask_index,
+                    pos_predictions,
+                    pos_mask_idx,
+                    batch,
+                    args,
+                    mode=mode,
+                )
+            loss_accum = loss_accum + loss
+            for k, v in loss_dict.items():
+                loss_accum_dict[f"{mode}_{k}"] += v
+        loss_accum_dict["loss"] += loss_accum.item()
     for k in loss_accum_dict.keys():
         loss_accum_dict[k] /= step + 1
     return loss_accum_dict
@@ -164,19 +163,36 @@ def main():
     parser.add_argument("--tasks", type=str, nargs="*", default=["mask", "mol2conf", "conf2mol"])
     parser.add_argument("--restore", action="store_true", default=False)
 
+    parser.add_argument('--energy_loss_weight', type=float, default=1.0)
+    parser.add_argument('--force_loss_weight', type=float, default=1.0)
+
     args = parser.parse_args()
     init_distributed_mode(args)
     print(args)
     assert len(args.tasks) >= 1
-    assert all([task in ["mask", "mol2conf", "conf2mol"] for task in args.tasks])
+    assert all([task in ["mask", "mol2conf", "conf2mol", "ff"] for task in args.tasks])
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
 
     device = torch.device(args.device)
-    dataset = Qm9Dataset() #PCQM4Mv2Dataset()
-    split_idx = dataset.get_idx_split()
+    dataset = MD17Dataset(
+        root="./dataset/MD17",
+        name="revised aspirin",
+    )
+
+    dataset_len = len(dataset)
+    train_size = (len(dataset) * 0.95)
+    test_size = dataset_len - train_size
+
+    print("train size: ", train_size, "test size: ", test_size)
+
+    split_idx = {
+        'train': list(range(0, int(train_size)))
+    }
+    # split_idx = dataset.get_idx_split()
+
 
     randperm = torch.randperm(len(split_idx["train"]))
     train_idxs = randperm[: int((0.1 if args.train_subset else 0.96) * len(split_idx["train"]))]
@@ -223,6 +239,8 @@ def main():
         pos_mask_prob=args.pos_mask_prob if args.pos_mask_prob is not None else args.mask_prob,
         pred_pos_residual=args.pred_pos_residual,
         raw_with_pos=args.raw_with_pos,
+        attr_predict=True,
+        num_tasks=1 # Energy only. Forece is computed in backward
     )
 
     model = GNNet(**shared_params).to(device)

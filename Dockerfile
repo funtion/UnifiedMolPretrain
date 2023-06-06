@@ -1,7 +1,7 @@
-FROM nvidia/cuda:11.1-cudnn8-runtime-ubuntu18.04
+FROM nvidia/cuda:11.1.1-cudnn8-runtime-ubuntu18.04
 
 ENV LANG=C.UTF-8
-RUN rm /etc/apt/sources.list.d/cuda.list && rm /etc/apt/sources.list.d/nvidia-ml.list && \
+RUN rm /etc/apt/sources.list.d/cuda.list && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     openssh-server  unzip curl \
     cmake gcc g++ \
@@ -41,3 +41,5 @@ RUN . /opt/conda/etc/profile.d/conda.sh && \
 ENV PATH /opt/conda/envs/${envname}/bin:$PATH
 EXPOSE 6006
 RUN echo "export LANG=C.UTF-8" >> /etc/profile
+
+RUN mkdir /run/sshd && chmod 0755 /run/sshd

@@ -47,11 +47,15 @@ class WarmLinear:
             return max(self.eta_min, self.eta_min + self.warmup_lr_step * step)
 
 
-def get_random_rotation_3d(pos):
+def get_random_rotation_3d(pos, force=None):
     random_quaternions = torch.randn(4).to(pos)
     random_quaternions = random_quaternions / random_quaternions.norm(dim=-1, keepdim=True)
-    return torch.einsum("kj,ij->ki", pos, quaternion_to_rotation_matrix(random_quaternions))
-
+    rotated_pos = torch.einsum("kj,ij->ki", pos, quaternion_to_rotation_matrix(random_quaternions))
+    if force is None:
+        return rotated_pos
+    rotated_force = torch.einsum("kj,ij->ki", force, quaternion_to_rotation_matrix(random_quaternions))
+    return rotated_pos, rotated_force
+    
 
 def quaternion_to_rotation_matrix(quaternion):
     q0 = quaternion[0]
@@ -79,9 +83,12 @@ class PreprocessBatch:
         if not self.norm2origin and not self.random_rotation:
             return
         pos = batch.pos
+        force = batch.force
         if self.norm2origin:
             pos_mean = global_mean_pool(pos, batch.batch)
             pos = pos - torch.repeat_interleave(pos_mean, batch.n_nodes, dim=0)
         if self.random_rotation:
-            pos = get_random_rotation_3d(pos)
+            pos, force = get_random_rotation_3d(pos, batch.force)
+        
         batch.pos = pos
+        batch.force = force        

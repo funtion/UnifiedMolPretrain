@@ -84,7 +84,7 @@ class Qm9Dataset(InMemoryDataset):
         self.data_seed = data_seed
         self.eV2meV = np.array(
             [1.0 if self.unit_conversion[task] == 1.0 else 1000.0 for task in self.target_tasks],
-            dtype=np.float,
+            dtype=float,
         ).reshape(1, -1)
 
     def get_idx_split(self):

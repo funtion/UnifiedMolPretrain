@@ -48,7 +48,7 @@ SUFFIX=$(echo ${POSITIONAL[*]} | sed -r 's/-//g' | sed -r 's/\s+/-/g')
 if [ "$restore" == "true" ]; then 
     POSITIONAL+=("--restore")
 fi 
-SAVEDIR=/model/pretrain3d/$prefix
+SAVEDIR=./model/pretrain3d/$prefix
 if [ -n "$SUFFIX" ]; then
     SAVEDIR=${SAVEDIR}-${SUFFIX}
 fi

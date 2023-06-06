@@ -87,7 +87,7 @@ class PCQM4Mv2Dataset(InMemoryDataset):
             else:
                 mol = Chem.MolFromSmiles(smiles)
                 num_atoms = mol.GetNumAtoms()
-                pos = np.zeros((num_atoms, 3), dtype=np.float)
+                pos = np.zeros((num_atoms, 3), dtype=float)
             graph = self.smiles2graph(mol)
 
             assert len(graph["edge_feat"]) == graph["edge_index"].shape[1]

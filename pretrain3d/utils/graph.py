@@ -87,7 +87,7 @@ def smiles2graphwithface(mol):
             nf_node.extend(face)
             nf_ring.extend([i] * len(face))
 
-        face_mask = np.array(face_mask, dtype=np.bool)
+        face_mask = np.array(face_mask, dtype=bool)
         face_index = np.array(face_index, dtype=np.int64).T
         n_nfs = len(nf_node)
         nf_node = np.array(nf_node, dtype=np.int64).reshape(1, -1)
@@ -96,7 +96,7 @@ def smiles2graphwithface(mol):
     else:
         edge_index = np.empty((2, 0), dtype=np.int64)
         edge_attr = np.empty((0, num_bond_features), dtype=np.int64)
-        face_mask = np.empty((0), dtype=np.bool)
+        face_mask = np.empty((0), dtype=bool)
         face_index = np.empty((2, 0), dtype=np.int64)
         num_faces = 0
         n_nfs = 0
@@ -113,7 +113,7 @@ def smiles2graphwithface(mol):
     nums_neigh = len(n_src)
     nei_src_index = np.array(n_src, dtype=np.int64).reshape(1, -1)
     nei_tgt_index = np.zeros((6, nums_neigh), dtype=np.int64)
-    nei_tgt_mask = np.ones((6, nums_neigh), dtype=np.bool)
+    nei_tgt_mask = np.ones((6, nums_neigh), dtype=bool)
 
     for i, n_ids in enumerate(n_tgt):
         nei_tgt_index[: len(n_ids), i] = n_ids
@@ -144,7 +144,7 @@ def smiles2graphwithface(mol):
 
 
 if __name__ == "__main__":
-    smiles_string = r"[N+]12CCC(CC1)C(OC(=O)C(O)(c1ccccc1)c1ccccc1)C2.[Br-]"
+    smiles_string = r"OC1C2C1CC2" #r"[N+]12CCC(CC1)C(OC(=O)C(O)(c1ccccc1)c1ccccc1)C2.[Br-]"
     mol = Chem.MolFromSmiles(smiles_string)
 
     faces, left, bond2id = getface(mol)
