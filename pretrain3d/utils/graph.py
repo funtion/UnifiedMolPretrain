@@ -1,6 +1,7 @@
 from rdkit import Chem
 from pretrain3d.utils.features import atom_to_feature_vector, bond_to_feature_vector
 import numpy as np
+import networkx as nx
 
 
 def getface(mol):
@@ -142,6 +143,44 @@ def smiles2graphwithface(mol):
 
     return graph
 
+
+def get_face_of_radius_graph(G):
+
+    bond2id = dict()
+    for i, bond in enumerate(G.edges()):
+        bond2id[tuple(bond)] = len(bond2id)
+        bond2id[tuple(reversed(bond))] = len(bond2id)
+
+    ssr = []
+    for cycle in nx.cycle_basis(G):
+        if len(cycle) > 2:
+            ssr.append(cycle)
+
+    num_edge = len(bond2id)
+    left = [0] * num_edge
+    face = [[]]
+    for ring in ssr:
+        ring = list(ring)
+
+        bond_list = []
+        for i, atom in enumerate(ring):
+            bond_list.append((ring[i - 1], atom))
+
+        exist = False
+        if any([left[bond2id[bond]] != 0 for bond in bond_list]):
+            exist = True
+        if exist:
+            ring = list(reversed(ring))
+        face.append(ring)
+        for i, atom in enumerate(ring):
+            bond = (ring[i - 1], atom)
+            if left[bond2id[bond]] != 0:
+                bond = (atom, ring[i - 1])
+            bondid = bond2id[bond]
+            if left[bondid] == 0:
+                left[bondid] = len(face) - 1
+
+    return face, left, bond2id
 
 if __name__ == "__main__":
     smiles_string = r"OC1C2C1CC2" #r"[N+]12CCC(CC1)C(OC(=O)C(O)(c1ccccc1)c1ccccc1)C2.[Br-]"

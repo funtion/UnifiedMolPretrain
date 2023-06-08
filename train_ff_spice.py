@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 import random
-from pretrain3d.data.spice import SPIRCE
+from pretrain3d.data.spice import SPICE
 from pretrain3d.model.gnn import GNNet
 from torch.optim.lr_scheduler import LambdaLR
 from pretrain3d.utils.misc import WarmCosine, PreprocessBatch
@@ -132,7 +132,7 @@ def main():
     parser.add_argument("--graph-pooling", type=str, default="sum")
     parser.add_argument("--dropedge-rate", type=float, default=0.1)
     parser.add_argument("--dropnode-rate", type=float, default=0.1)
-    parser.add_argument("--num-layers", type=int, default=12)
+    parser.add_argument("--num-layers", type=int, default=6)
     parser.add_argument("--latent-size", type=int, default=256)
     parser.add_argument("--mlp-hidden-size", type=int, default=1024)
     parser.add_argument("--mlp-layers", type=int, default=2)
@@ -172,13 +172,15 @@ def main():
 
     parser.add_argument("--eval-from", type=str, default=None)
     parser.add_argument("--pos-mask-prob", type=float, default=None)
-    parser.add_argument("--tasks", type=str, nargs="*", default=["mask", "mol2conf", "conf2mol"])
+    parser.add_argument("--tasks", type=str, nargs="*", default=["ff"])
     parser.add_argument("--restore", action="store_true", default=False)
 
     parser.add_argument('--energy_loss_weight', type=float, default=1.0)
     parser.add_argument('--force_loss_weight', type=float, default=1.0)
 
     args = parser.parse_args()
+    args.enable_wandb = "WANDB_API_KEY" in os.environ
+
     init_distributed_mode(args)
     print(args)
     assert len(args.tasks) >= 1
@@ -190,34 +192,29 @@ def main():
 
     device = torch.device(args.device)
 
+    train_dataset = SPICE(root="./dataset/SPICE", split="train")
+    valid_dataset = SPICE(root="./dataset/SPICE", split="validation")
+    test_dataset = SPICE(root="./dataset/SPICE", split="test")
 
-    dataset = SPIRCE(
-        root="./dataset/SPIRCE",
-    )
-
-    train_size = len(dataset.train_data)
-    valid_size = len(dataset.validation_data)
-    test_size = len(dataset.test_data)
+    train_size = len(train_dataset)
+    valid_size = len(valid_dataset)
+    test_size = len(test_dataset)
 
     print("train size: ", train_size, "valid size:", valid_size, "test size: ", test_size)
 
-    split_idx = {
-        'train': list(range(0, int(train_size)))
-    }
-    
     if args.distributed:
-        sampler_train = DistributedSampler(dataset.train_data)
+        sampler_train = DistributedSampler(train_dataset)
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset.train_data)
+        sampler_train = torch.utils.data.RandomSampler(train_dataset)
 
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True
     )
     train_loader = DataLoader(
-        dataset.train_data, batch_sampler=batch_sampler_train, num_workers=args.num_workers
+        train_dataset, batch_sampler=batch_sampler_train, num_workers=args.num_workers
     )
     valid_loader = DataLoader(
-        dataset.validation_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+        valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
     shared_params = dict(
@@ -297,8 +294,15 @@ def main():
         )
         args.checkpoint_dir = "" if args.rank != 0 else args.checkpoint_dir
         args.enable_tb = False if args.rank != 0 else args.enable_tb
-        args.enable_wandb = False if args.rank != 0 else args.enable_wandb
+        args.enable_wandb = args.rank == 0 and args.enable_wandb
         args.disable_tqdm = args.rank != 0
+    
+    if args.enable_wandb:
+        wandb.init(
+            project="unignn_spice",
+            config=args,
+        )
+
     print(model_without_ddp)
     num_params = sum(p.numel() for p in model_without_ddp.parameters())
     print(f"#Params: {num_params}")
@@ -321,15 +325,7 @@ def main():
     if args.checkpoint_dir and args.enable_tb:
         tb_writer = SummaryWriter(args.checkpoint_dir)
     
-    if args.enable_wandb:
-        # check environment variables for access key
-        if not os.environ["WANDB_API_KEY"]:
-            args.enable_wandb = False
-        else:
-            wandb.init(
-                project="unignn_spice",
-                config=args,
-            )
+
 
     start_epoch = restore_checkpint["epoch"] if args.restore else 0
     for epoch in range(start_epoch + 1, args.epochs + 1):
@@ -372,6 +368,9 @@ def main():
     if args.distributed:
         torch.distributed.destroy_process_group()
     print("Finished traning!")
+
+    if args.enable_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

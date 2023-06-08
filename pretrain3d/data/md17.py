@@ -11,47 +11,11 @@ from torch_geometric.nn import radius_graph
 from typing import Callable, List, Optional
 from tqdm import tqdm
 
+from pretrain3d.utils.graph import get_face_of_radius_graph
+from pretrain3d.data.pcqm4m import DGData
 # also see pretrain3d/utils/graph.py
-def get_face_of_radius_graph(G):
 
-    bond2id = dict()
-    for i, bond in enumerate(G.edges()):
-        bond2id[tuple(bond)] = len(bond2id)
-        bond2id[tuple(reversed(bond))] = len(bond2id)
-
-    ssr = []
-    for cycle in nx.cycle_basis(G):
-        if len(cycle) > 2:
-            ssr.append(cycle)
-
-    num_edge = len(bond2id)
-    left = [0] * num_edge
-    face = [[]]
-    for ring in ssr:
-        ring = list(ring)
-
-        bond_list = []
-        for i, atom in enumerate(ring):
-            bond_list.append((ring[i - 1], atom))
-
-        exist = False
-        if any([left[bond2id[bond]] != 0 for bond in bond_list]):
-            exist = True
-        if exist:
-            ring = list(reversed(ring))
-        face.append(ring)
-        for i, atom in enumerate(ring):
-            bond = (ring[i - 1], atom)
-            if left[bond2id[bond]] != 0:
-                bond = (atom, ring[i - 1])
-            bondid = bond2id[bond]
-            if left[bondid] == 0:
-                left[bondid] = len(face) - 1
-
-    return face, left, bond2id
     
-
-
 class MD17Dataset(MD17):
     def __init__(
         self,
@@ -190,23 +154,3 @@ class MD17Dataset(MD17):
                 data_list.append(data)
 
             torch.save(self.collate(data_list), processed_path)
-
-class DGData(Data):
-    def __cat_dim__(self, key, value, *args, **kwargs):
-        if isinstance(value, SparseTensor):
-            return (0, 1)
-        elif bool(re.search("(index|face)", key)):
-            return -1
-        elif bool(re.search("(nf_node|nf_ring|nei_tgt_mask)", key)):
-            return -1
-        return 0
-
-    def __inc__(self, key, value, *args, **kwargs):
-        if bool(re.search("(ring_index|nf_ring)", key)):
-            return int(self.num_rings.item())
-        elif bool(re.search("(index|face|nf_node)", key)):
-            return self.num_nodes
-        else:
-            return 0
-
-
