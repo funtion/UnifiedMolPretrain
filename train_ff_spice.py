@@ -2,6 +2,7 @@ from builtins import enumerate
 import os
 import argparse
 import torch
+import torch_geometric
 from torch_geometric.loader import DataLoader
 import torch.optim as optim
 from torch import nn
@@ -20,7 +21,7 @@ from torch.utils.data import DistributedSampler
 import wandb
 
 
-
+# torch.set_float32_matmul_precision('high')
 
 def train(model, device, loader, optimizer, scheduler, args, preprocessor):
     model.train()
@@ -63,6 +64,11 @@ def train(model, device, loader, optimizer, scheduler, args, preprocessor):
             loss_accum.backward()
             if args.grad_norm is not None:
                 nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm)
+            
+            if args.enable_wandb:
+                grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in model.parameters() if p.grad is not None]), 2)
+                wandb.log({'gnorm': grad_norm.item()})
+
             optimizer.step()
             scheduler.step()
 
@@ -121,6 +127,11 @@ def evaluate(model, device, loader, args, preprocessor, model_train=False):
         loss_accum_dict["loss"] += loss_accum.item()
     for k in loss_accum_dict.keys():
         loss_accum_dict[k] /= step + 1
+    
+    if args.enable_wandb:
+        for k, v in loss_accum_dict.items():
+            wandb.log({f"vlidation/{k}": v / (step + 1)})
+            
     return loss_accum_dict
 
 
@@ -177,6 +188,9 @@ def main():
 
     parser.add_argument('--energy_loss_weight', type=float, default=1.0)
     parser.add_argument('--force_loss_weight', type=float, default=1.0)
+    parser.add_argument('--max-force', type=float, default=100)
+    parser.add_argument('--loss_type', type=str, default='huber')
+    parser.add_argument('--huber-delta', type=float, default=1.0)
 
     args = parser.parse_args()
     args.enable_wandb = "WANDB_API_KEY" in os.environ
@@ -247,6 +261,7 @@ def main():
     )
 
     model = GNNet(**shared_params).to(device)
+    
     preprocessor = PreprocessBatch(True, args.random_rotation)
 
     args.disable_tqdm = False
@@ -296,6 +311,8 @@ def main():
         args.enable_tb = False if args.rank != 0 else args.enable_tb
         args.enable_wandb = args.rank == 0 and args.enable_wandb
         args.disable_tqdm = args.rank != 0
+    
+    # model = torch_geometric.compile(model)
     
     if args.enable_wandb:
         wandb.init(

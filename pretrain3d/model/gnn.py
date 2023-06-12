@@ -284,6 +284,15 @@ class GNNet(nn.Module):
                 use_bn=use_bn,
                 pooler_dropout=pooler_dropout,
             )
+        
+        self.force_predictor = MLPwoLastAct(
+            latent_size,
+            [ap_hid_size] * ap_mlp_layers + [3],
+            use_layer_norm=False,
+            dropout=pooler_dropout,
+            use_bn=use_bn,
+        )
+
         self.attr_predict = attr_predict
         self.pooling = _REDUCER_NAMES[graph_pooling]
         self.aggregate_edges_for_face_fn = _REDUCER_NAMES[face_reducer]
@@ -396,6 +405,9 @@ class GNNet(nn.Module):
             mode=mode,
             pos=pos,
         )
+        
+        force_pred = self.force_predictor(x)
+        
         if self.attr_predict:
             x = self.pooling(x, node_batch, size=num_graphs)
             x = GradMultiply.apply(x, self.gradmultiply)
@@ -408,16 +420,16 @@ class GNNet(nn.Module):
         if mode == "ff":
             # For force field, we don't use the pred pos.
             # instead, we backprop the force to the pos.
-            grad_outputs = [torch.ones_like(pred_attrs)]
-            force = grad(
-                [pred_attrs],
-                [pos],
-                grad_outputs=grad_outputs,
-                create_graph=True,
-                retain_graph=True,
-            )
+            # grad_outputs = [torch.ones_like(pred_attrs)]
+            # force = grad(
+            #     [pred_attrs],
+            #     [pos],
+            #     grad_outputs=grad_outputs,
+            #     create_graph=True,
+            #     retain_graph=True,
+            # )
 
-            return pred_attrs, None, force[0], None
+            return pred_attrs, None, force_pred, None
 
 
         return pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx
@@ -448,16 +460,50 @@ class GNNet(nn.Module):
     def compute_ff_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
     ):
-        # The FF loss contains both energy and force loss
-
-        gt_energy = batch.energy
+        gt_energy = batch.energy / batch.n_nodes        
         gt_force = batch.force
-        energy_loss = F.mse_loss(pred_attrs.squeeze(-1), gt_energy, reduction="mean")
-        force_loss = F.mse_loss(pos_predictions, gt_force, reduction="mean")
+        
+        pred_energy = pred_attrs.squeeze(-1) / batch.n_nodes
+        
+        energy_l1 = F.l1_loss(pred_energy, gt_energy, reduction="mean")
+        energy_l2 = F.mse_loss(pred_energy, gt_energy, reduction="mean")
+        energy_huber = F.huber_loss(pred_energy, gt_energy, reduction="mean", delta=args.huber_delta)
+        
+        energy_loss_dict = {
+            'l1': energy_l1,
+            'l2': energy_l2,
+            'huber': energy_huber
+        }
+        
+        energy_loss = energy_loss_dict[args.loss_type]
+
+        ##############################################
+        force_mask = gt_force.abs().max(dim=-1)[0] < args.max_force
+        force_l1 = F.l1_loss(pos_predictions[force_mask], gt_force[force_mask], reduction="mean")
+        force_l2 = F.mse_loss(pos_predictions[force_mask], gt_force[force_mask], reduction="mean")
+        foce_huber = F.huber_loss(pos_predictions[force_mask], gt_force[force_mask], reduction="mean", delta=args.huber_delta)
+        
+        force_loss_dict = {
+            'l1': force_l1,
+            'l2': force_l2,
+            'huber': foce_huber
+        }
+        
+        force_loss = force_loss_dict[args.loss_type]
 
         loss = energy_loss * args.energy_loss_weight + force_loss * args.force_loss_weight
-        return loss, dict(loss=loss.item(), energy_loss=energy_loss.item(), force_loss=force_loss.item())
 
+        loss_dict = {
+            'loss': loss.item(),
+        }
+        
+        for k, v in energy_loss_dict.items():
+            loss_dict['energy_' + k] = v.item()
+        
+        for k, v in force_loss_dict.items():
+            loss_dict['force_' + k] = v.item() 
+        
+        return loss, loss_dict
 
     def compute_mask_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
