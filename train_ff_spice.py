@@ -26,6 +26,7 @@ import wandb
 def train(model, device, loader, optimizer, scheduler, args, preprocessor):
     model.train()
     loss_accum_dict = defaultdict(float)
+    loss_log_dict = defaultdict(float)
     pbar = tqdm(loader, desc="Iteration", disable=args.disable_tqdm)
     for step, batch in enumerate(pbar):
         batch = batch.to(device)
@@ -60,14 +61,11 @@ def train(model, device, loader, optimizer, scheduler, args, preprocessor):
                 loss_accum = loss_accum + loss
                 for k, v in loss_dict.items():
                     loss_accum_dict[f"{mode}_{k}"] += v
+                    loss_log_dict[f"{mode}_{k}"] += v
             loss_accum_dict["loss"] += loss_accum.item()
             loss_accum.backward()
             if args.grad_norm is not None:
                 nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm)
-            
-            if args.enable_wandb:
-                grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in model.parameters() if p.grad is not None]), 2)
-                wandb.log({'gnorm': grad_norm.item()})
 
             optimizer.step()
             scheduler.step()
@@ -78,10 +76,15 @@ def train(model, device, loader, optimizer, scheduler, args, preprocessor):
                 pbar.set_description(description)
 
                 if args.enable_wandb:
-                    for k, v in loss_accum_dict.items():
-                        wandb.log({f"train_inner/{k}": v / (step + 1)})
+                    for k, v in loss_log_dict.items():
+                        wandb.log({f"train_inner/{k}": v / args.log_interval})
+                    
+                    loss_log_dict = defaultdict(float)
                     
                     wandb.log({"lr": scheduler.get_last_lr()[0]})
+                    
+                    grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in model.parameters() if p.grad is not None]), 2)
+                    wandb.log({'gnorm': grad_norm.item()})
 
 
     for k in loss_accum_dict.keys():
@@ -97,41 +100,39 @@ def evaluate(model, device, loader, args, preprocessor, model_train=False):
     for step, batch in enumerate(tqdm(loader, desc="Valid Iteration", disable=args.disable_tqdm)):
         batch = batch.to(device)
         preprocessor.process(batch)
-        # with torch.no_grad(): # we need grad for the force
-        loss_accum = 0
-        for mode in args.tasks:
-            pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
-            if args.distributed:
-                loss, loss_dict = model.module.compute_loss(
-                    pred_attrs,
-                    attr_mask_index,
-                    pos_predictions,
-                    pos_mask_idx,
-                    batch,
-                    args,
-                    mode=mode,
-                )
-            else:
-                loss, loss_dict = model.compute_loss(
-                    pred_attrs,
-                    attr_mask_index,
-                    pos_predictions,
-                    pos_mask_idx,
-                    batch,
-                    args,
-                    mode=mode,
-                )
-            loss_accum = loss_accum + loss
-            for k, v in loss_dict.items():
-                loss_accum_dict[f"{mode}_{k}"] += v
-        loss_accum_dict["loss"] += loss_accum.item()
+        with torch.no_grad(): # we need grad for the force
+            loss_accum = 0
+            for mode in args.tasks:
+                pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
+                if args.distributed:
+                    loss, loss_dict = model.module.compute_loss(
+                        pred_attrs,
+                        attr_mask_index,
+                        pos_predictions,
+                        pos_mask_idx,
+                        batch,
+                        args,
+                        mode=mode,
+                    )
+                else:
+                    loss, loss_dict = model.compute_loss(
+                        pred_attrs,
+                        attr_mask_index,
+                        pos_predictions,
+                        pos_mask_idx,
+                        batch,
+                        args,
+                        mode=mode,
+                    )
+                loss_accum = loss_accum + loss
+                for k, v in loss_dict.items():
+                    loss_accum_dict[f"{mode}_{k}"] += v
+            
+            loss_accum_dict["loss"] += loss_accum.item()
+    
     for k in loss_accum_dict.keys():
         loss_accum_dict[k] /= step + 1
     
-    if args.enable_wandb:
-        for k, v in loss_accum_dict.items():
-            wandb.log({f"vlidation/{k}": v / (step + 1)})
-            
     return loss_accum_dict
 
 
@@ -190,13 +191,13 @@ def main():
     parser.add_argument('--force_loss_weight', type=float, default=1.0)
     parser.add_argument('--max-force', type=float, default=100)
     parser.add_argument('--loss_type', type=str, default='huber')
-    parser.add_argument('--huber-delta', type=float, default=1.0)
+    parser.add_argument('--huber-delta', type=float, default=0.01)
 
     args = parser.parse_args()
     args.enable_wandb = "WANDB_API_KEY" in os.environ
 
     init_distributed_mode(args)
-    print(args)
+    
     assert len(args.tasks) >= 1
     assert all([task in ["mask", "mol2conf", "conf2mol", "ff"] for task in args.tasks])
     np.random.seed(args.seed)
@@ -213,8 +214,6 @@ def main():
     train_size = len(train_dataset)
     valid_size = len(valid_dataset)
     test_size = len(test_dataset)
-
-    print("train size: ", train_size, "valid size:", valid_size, "test size: ", test_size)
 
     if args.distributed:
         sampler_train = DistributedSampler(train_dataset)
@@ -262,8 +261,9 @@ def main():
 
     model = GNNet(**shared_params).to(device)
     
-    preprocessor = PreprocessBatch(True, args.random_rotation)
-
+    train_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=args.random_rotation)
+    valid_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=False)
+    
     args.disable_tqdm = False
     if args.eval_from is not None:
         assert os.path.exists(args.eval_from)
@@ -274,18 +274,18 @@ def main():
 
         print("model train")
         train_loss_dict = evaluate(
-            model, device, train_loader, args, preprocessor, model_train=True
+            model, device, train_loader, args, train_preprocessor, model_train=True
         )
         print("train", json.dumps(train_loss_dict))
         valid_loss_dict = evaluate(
-            model, device, valid_loader, args, preprocessor, model_train=True
+            model, device, valid_loader, args, valid_preprocessor, model_train=True
         )
         print("valid", json.dumps(valid_loss_dict))
 
         print("model eval")
-        train_loss_dict = evaluate(model, device, train_loader, args, preprocessor)
+        train_loss_dict = evaluate(model, device, train_loader, args, train_preprocessor)
         print("train", json.dumps(train_loss_dict))
-        valid_loss_dict = evaluate(model, device, valid_loader, args, preprocessor)
+        valid_loss_dict = evaluate(model, device, valid_loader, args, valid_preprocessor)
         print("valid", json.dumps(valid_loss_dict))
 
         exit(0)
@@ -319,6 +319,9 @@ def main():
             project="unignn_spice",
             config=args,
         )
+    
+    print(args)
+    print("train size: ", train_size, "valid size:", valid_size, "test size: ", test_size)
 
     print(model_without_ddp)
     num_params = sum(p.numel() for p in model_without_ddp.parameters())
@@ -342,8 +345,6 @@ def main():
     if args.checkpoint_dir and args.enable_tb:
         tb_writer = SummaryWriter(args.checkpoint_dir)
     
-
-
     start_epoch = restore_checkpint["epoch"] if args.restore else 0
     for epoch in range(start_epoch + 1, args.epochs + 1):
         if args.distributed:
@@ -351,10 +352,10 @@ def main():
         print("=====Epoch {}".format(epoch))
         print("Training...")
         train_loss_dict = train(
-            model, device, train_loader, optimizer, scheduler, args, preprocessor
+            model, device, train_loader, optimizer, scheduler, args, train_preprocessor
         )
         print("Evaluating...")
-        valid_loss_dict = evaluate(model, device, valid_loader, args, preprocessor)
+        valid_loss_dict = evaluate(model, device, valid_loader, args, valid_preprocessor)
 
         if args.checkpoint_dir:
             print(f"Setting {os.path.basename(os.path.normpath(args.checkpoint_dir))}...")

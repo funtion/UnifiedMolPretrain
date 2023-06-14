@@ -46,15 +46,33 @@ class WarmLinear:
         else:
             return max(self.eta_min, self.eta_min + self.warmup_lr_step * step)
 
+# GPT4 write this, hope this is correct
+# TODO: here the whole batch is using same rotation, maybe we can use different rotation for each molecule
+def make_random_quaternion(pos):  
+    u1, u2, u3 = torch.rand(3).to(pos)
+    theta1 = 2 * torch.pi * u1  
+    theta2 = 2 * torch.pi * u2  
+    r1 = torch.sqrt(1 - u3)  
+    r2 = torch.sqrt(u3)  
+  
+    w = r1 * torch.cos(theta1)  
+    x = r1 * torch.sin(theta1)  
+    y = r2 * torch.cos(theta2)
+    z = r2 * torch.sin(theta2)  
+  
+    return torch.tensor([w, x, y, z]).to(pos)  
 
-def get_random_rotation_3d(pos, force=None):
-    random_quaternions = torch.randn(4).to(pos)
-    random_quaternions = random_quaternions / random_quaternions.norm(dim=-1, keepdim=True)
-    rotated_pos = torch.einsum("kj,ij->ki", pos, quaternion_to_rotation_matrix(random_quaternions))
+def get_random_rotation_3d(pos, force=None, edge_attr=None):
+    # random_quaternions = torch.randn(4).to(pos)
+    # random_quaternions = random_quaternions / random_quaternions.norm(dim=-1, keepdim=True)
+    random_quaternions = make_random_quaternion(pos)
+    R = quaternion_to_rotation_matrix(random_quaternions)
+    rotated_pos = torch.einsum("kj,ij->ki", pos, R)
     if force is None:
         return rotated_pos
-    rotated_force = torch.einsum("kj,ij->ki", force, quaternion_to_rotation_matrix(random_quaternions))
-    return rotated_pos, rotated_force
+    rotated_force = torch.einsum("kj,ij->ki", force, R)
+    rotated_edge_attr = torch.einsum("kj,ij->ki", edge_attr, R)
+    return rotated_pos, rotated_force, rotated_edge_attr
     
 
 def quaternion_to_rotation_matrix(quaternion):
@@ -84,11 +102,13 @@ class PreprocessBatch:
             return
         pos = batch.pos
         force = batch.force
+        edge_attr = batch.edge_attr
         if self.norm2origin:
             pos_mean = global_mean_pool(pos, batch.batch)
             pos = pos - torch.repeat_interleave(pos_mean, batch.n_nodes, dim=0)
         if self.random_rotation:
-            pos, force = get_random_rotation_3d(pos, batch.force)
+            pos, force, edge_attr = get_random_rotation_3d(pos, force, edge_attr)
         
         batch.pos = pos
-        batch.force = force        
+        batch.force = force
+        batch.edge_attr = edge_attr
