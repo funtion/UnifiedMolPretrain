@@ -11,6 +11,43 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+mol = Chem.MolFromSmiles("LiFePO4")
+# mol = Chem.MolFromSmiles("C")
+# mol = Chem.AddHs(mol)
+
+data = DGData()
+graph = smiles2graphwithface(mol)
+
+assert len(graph["edge_feat"]) == graph["edge_index"].shape[1]
+assert len(graph["node_feat"]) == graph["num_nodes"]
+
+data.__num_nodes__ = int(graph["num_nodes"])
+data.edge_index = torch.from_numpy(graph["edge_index"]).to(torch.int64)
+data.edge_attr = torch.from_numpy(graph["edge_feat"]).to(torch.int64)
+data.x = torch.from_numpy(graph["node_feat"]).to(torch.int64)
+
+# target = torch.tensor(
+#     molecules_df.iloc[data_qm9["id"][mol_idx]][5:-4], dtype=torch.float
+# )
+# data.y = target.view(1, -1) * torch.tensor(self.unit_conversion_values)[None, :]
+
+data.ring_mask = torch.from_numpy(graph["ring_mask"]).to(torch.bool)
+data.ring_index = torch.from_numpy(graph["ring_index"]).to(torch.int64)
+data.nf_node = torch.from_numpy(graph["nf_node"]).to(torch.int64)
+data.nf_ring = torch.from_numpy(graph["nf_ring"]).to(torch.int64)
+data.num_rings = int(graph["num_rings"])
+data.n_edges = int(graph["n_edges"])
+data.n_nodes = int(graph["n_nodes"])
+data.n_nfs = int(graph["n_nfs"])
+data.rdmol = deepcopy(mol)
+
+pos = coordinates[total_atoms : total_atoms + n_atoms]
+total_atoms += n_atoms
+data.pos = pos
+data_list.append(data)
+
+
+
 hartree2eV = physical_constants["hartree-electron volt relationship"][0]
 
 
@@ -113,12 +150,12 @@ class Qm9Dataset(InMemoryDataset):
     @property
     def processed_file_names(self):
         return "geometric_data_processed.pt"
-        
-    # def download(self):
-    #     if not os.path.exists(self.processed_paths[0]):
-    #         filepath = os.path.dirname(__file__)
-    #         assert os.path.exists(os.path.join(filepath, "qm9_eV.npz"))
-    #         assert os.path.exists(os.path.join(filepath, "qm9.csv"))
+
+    def download(self):
+        if not os.path.exists(self.processed_paths[0]):
+            filepath = os.path.dirname(__file__)
+            assert os.path.exists(os.path.join(filepath, "qm9_eV.npz"))
+            assert os.path.exists(os.path.join(filepath, "qm9.csv"))
 
     def process(self):
         filepath = os.path.dirname(__file__)

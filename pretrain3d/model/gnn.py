@@ -3,6 +3,7 @@ import torch
 from torch import nn
 from torch import random
 from torch.autograd import grad
+from sklearn.metrics import mean_absolute_error, roc_auc_score
 from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
 from pretrain3d.utils.features import get_atom_feature_dims, get_bond_feature_dims
 from pretrain3d.model.conv import (
@@ -345,7 +346,7 @@ class GNNet(nn.Module):
             batch.n_nodes,
             batch.num_rings,
             batch.n_edges,
-            batch.num_graphs,
+            batch.num_graphs,  # batch size
             batch.nf_node.view(-1),
             batch.nf_ring.view(-1),
             batch.pos,
@@ -408,13 +409,19 @@ class GNNet(nn.Module):
         
         force_pred = self.force_predictor(x)
         
+        
+        if mode == "mol2conf":
+            return None, None, pos_predictions, None  
         if self.attr_predict:
             x = self.pooling(x, node_batch, size=num_graphs)
             x = GradMultiply.apply(x, self.gradmultiply)
-        if mode == "mol2conf":
-            return None, None, pos_predictions, None
+
         pred_attrs = self.attr_decoder(x, mode=mode)
+
         if mode == "conf2mol":
+            return pred_attrs, None, None, None
+        
+        if mode == "matbench":
             return pred_attrs, None, None, None
 
         if mode == "ff":
@@ -452,6 +459,10 @@ class GNNet(nn.Module):
             )
         elif mode == "ff":
             return self.compute_ff_loss(
+                pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
+            )
+        elif mode == "matbench":
+            return self.compute_matbench_loss(
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
             )
         else:
@@ -504,6 +515,35 @@ class GNNet(nn.Module):
             loss_dict['force_' + k] = v.item() 
         
         return loss, loss_dict
+
+    def compute_matbench_loss(
+        self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
+    ):
+        gt_energy = batch.target / batch.n_nodes        
+        # gt_force = batch.force
+        
+        pred_energy = pred_attrs.squeeze(-1) / batch.n_nodes
+        
+        energy_l1 = F.l1_loss(pred_energy, gt_energy, reduction="mean")
+        energy_l2 = F.mse_loss(pred_energy, gt_energy, reduction="mean")
+        energy_huber = F.huber_loss(pred_energy, gt_energy, reduction="mean", delta=args.huber_delta)
+        
+        energy_loss_dict = {
+            'l1': energy_l1,
+            'l2': energy_l2,
+            'huber': energy_huber
+        }
+        
+        loss = energy_loss_dict[args.loss_type]
+        loss_dict = {
+            'loss': loss.item(),
+        }
+        
+        for k, v in energy_loss_dict.items():
+            loss_dict['energy_' + k] = v.item()
+        
+        return loss, loss_dict
+
 
     def compute_mask_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
@@ -756,6 +796,8 @@ class AtomEmbeddingwithMask(nn.Module):
             return self.mol2conf(x)
         elif mode == "ff":
             return self.mol2conf(x)
+        elif mode == "matbench":
+            return self.mol2conf(x)
         else:
             raise NotImplementedError()
 
@@ -780,7 +822,7 @@ class AtomEmbeddingwithMask(nn.Module):
         return self.encoder_node(x)
 
     def update_edge_feat(self, edge_attr, edge_index, attr_mask_index, mode="mask"):
-        if mode in ["raw", "mol2conf", "ff"]:
+        if mode in ["raw", "mol2conf", "ff", "matbench"]:
             return edge_attr
         elif mode == "mask":
             src = edge_index[0]

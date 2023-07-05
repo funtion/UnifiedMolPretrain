@@ -1,6 +1,7 @@
 #!/bin/bash
 
-export WANDB_API_KEY=d34f864932245bbdf3a9396a1ebde883ad2068f3
+# export WANDB_API_KEY=d34f864932245bbdf3a9396a1ebde883ad2068f3
+export WANDB_API_KEY=a1645f5f73193eab34aae47a4375b5aebcd519fb
 
 python -u train_ff_spice.py \
     --num-layers 6 \

@@ -173,16 +173,16 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
-
     device = torch.device(args.device)
+
     dataset = Qm9Dataset() #PCQM4Mv2Dataset()
     split_idx = dataset.get_idx_split()
 
     randperm = torch.randperm(len(split_idx["train"]))
     train_idxs = randperm[: int((0.1 if args.train_subset else 0.96) * len(split_idx["train"]))]
     dev_idxs = randperm[int(0.96 * len(split_idx["train"])) :]
-
     dataset_train = dataset[train_idxs]
+
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
     else:

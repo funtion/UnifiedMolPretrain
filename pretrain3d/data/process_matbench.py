@@ -3,6 +3,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from matbench.bench import MatbenchBenchmark
+from pymatgen.optimization.neighbors import find_points_in_spheres
 from pretrain3d.utils.graph import get_face_of_radius_graph
 from pretrain3d.data.pcqm4m import DGData
 from torch_geometric.nn import radius_graph
@@ -16,11 +18,35 @@ TRAIN_PARTITIONS = 10
 def process_sinlge(args):
     z = torch.LongTensor(args[0])
     pos = torch.FloatTensor(args[1])
-    energy = torch.FloatTensor([args[2]])
-    force = torch.FloatTensor(args[3])
+    target = torch.FloatTensor([args[2]])
+    crystal_structure = args[3]
+    cutoff_radius = 5.0
+    numerical_tol = 1e-8
 
-    data = DGData(z=z, pos=pos, energy=energy, force=force)
-    edge_index = radius_graph(pos, r=5)
+    data = DGData(z=z, pos=pos, target=target)
+    # edge_index0= radius_graph(pos, r=5)
+
+    pbc_ = np.array([0, 0, 0], dtype=int)
+    center_indices, neighbor_indices, images, distances = find_points_in_spheres(
+        crystal_structure.cart_coords,
+        crystal_structure.cart_coords,
+        r=cutoff_radius,
+        pbc=pbc_,
+        lattice=crystal_structure.lattice.matrix.astype(float),
+        tol=numerical_tol,
+    )
+
+    center_indices = center_indices.astype(np.int64)
+    neighbor_indices = neighbor_indices.astype(np.int64)
+    images = images.astype(np.int64)
+    distances = distances.astype(float)
+    exclude_self = (center_indices != neighbor_indices) | (distances > numerical_tol)
+    sent_index = center_indices[exclude_self]
+    receive_index = neighbor_indices[exclude_self]
+    shift_vectors = images[exclude_self]
+    distances = distances[exclude_self]
+    edge_index = torch.from_numpy(np.array([sent_index,receive_index]))
+    
 
     data.__num_nodes__ = int(pos.size(0))
 
@@ -31,7 +57,7 @@ def process_sinlge(args):
     edges_list = []
     edge_features_list = []
 
-    num_bond_features = 3 # dx, dy, dz
+    num_bond_features = 3 # dx, dy, dz 
     if len(G.edges()) > 0:
         for bond in G.edges():
             s = bond[0]
@@ -48,11 +74,11 @@ def process_sinlge(args):
         edge_index = torch.LongTensor(edges_list).T
         edge_attr = torch.stack(edge_features_list)
 
-        faces, left, _ = get_face_of_radius_graph(G)
+        faces, left, _ = get_face_of_radius_graph(G)  # ring left ?
 
         num_faces = len(faces)
         face_mask = [False] * num_faces
-        face_index = [[-1, -1]] * len(edges_list)
+        face_index = [[-1, -1]] * len(edges_list)  # ? 表示什么？
         face_mask[0] = True
         for ii in range(len(edges_list)):
             inface = left[ii ^ 1]
@@ -119,17 +145,21 @@ def process_sinlge(args):
 
     return data
 
-class SPICE(InMemoryDataset):
-    def __init__(self, root, split: str, transform=None, pre_transform=None, pre_filter=None):
-        assert split in ['train', 'validation', 'test']
+
+
+class MATBENCH(InMemoryDataset):
+    def __init__(self, root, dataset_name: str, split:str, cutoff_radius=5.,transform=None, pre_transform=None, pre_filter=None):
+        # assert split in ['train', 'validation', 'test']
+        self.dataset_name = dataset_name
         self.split = split
+        self.cutoff_radius = cutoff_radius
+        self.matbench = MatbenchBenchmark(autoload=False)
         super().__init__(root, transform, pre_transform, pre_filter)
 
         self.data, self.slices = torch.load(self.processed_paths[0])
-        print(self.data)
-        print("********************************")
-        print(self.slices)
-        print("##############")
+        print("Dataset: ",self.data)
+        print("*********************************************")
+
     @property
     def raw_file_names(self):
         return [self.split + '.npz']
@@ -144,35 +174,40 @@ class SPICE(InMemoryDataset):
         r"""The absolute filepaths that must be present in order to skip
         processing."""
         files = self.processed_file_names
-        res = []
-        for f in list(files):
-            a = os.path.join(self.processed_dir, f)
-            res.append(a)
         return [os.path.join(self.processed_dir, f) for f in list(files)]
 
     def process(self):
-        data = np.load(self.raw_paths[0], allow_pickle=True)
+        task = getattr(self.matbench, self.dataset_name)
+        task.load()
+        if self.split == "train":
+            data = task.get_train_and_val_data(0, as_type="df")  # fold == 0
+        elif self.split == "test":
+            data = task.get_test_data(
+                    0, include_target=True, as_type="df"
+                )
+            
+        target_name = [ col for col in data.columns
+                   if col not in ("id", "structure", "composition")
+                ][0]
+        
+        
+        z_list = []
+        pos_list = []
+        target_list = []
+        crystal_structure_list = []
 
-        z_list = data['z']
-        pos_list = data['R']
-        energy_list = data['E']
-        force_list = data['F']
+        for _, j in data.iterrows():
+            z_list.append(np.array(j.structure.atomic_numbers))
+            pos_list.append(j.structure.cart_coords)
+            target_list.append(getattr(j, target_name))
+            crystal_structure_list.append(j.structure.copy())
 
         data_list = []
         for result in map(
             process_sinlge,
-            tqdm(zip(z_list, pos_list, energy_list, force_list), total=len(z_list), desc=f'Processing {self.processed_paths[0]}'),
+            tqdm(zip(z_list, pos_list, target_list, crystal_structure_list), total=len(z_list), desc=f'Processing {self.processed_paths[0]}'),
         ):
             data_list.append(result)
-        # with mp.Pool(processes=mp.cpu_count()) as pool:
-        #     data_list = pool.map(
-        #         process_sinlge,
-        #         tqdm(zip(z_list, pos_list, energy_list, force_list), total=len(z_list), desc=f'Processing {self.processed_paths[split_idx]}'),
-        #         )
-
-            # batch_size = math.ceil(len(data_list) // TRAIN_PARTITIONS)
-            # print('Batch size:', batch_size, 'Total data:', len(data_list), 'Total partitions:', TRAIN_PARTITIONS)
-            # batchs = [data_list[i * batch_size : (i + 1) * batch_size] for i in range(TRAIN_PARTITIONS)]
         print("Processed data success!")
         data, slices = self.collate(data_list)
         print("Collated data success!")

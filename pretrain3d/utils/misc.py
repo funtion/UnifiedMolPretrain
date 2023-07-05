@@ -50,6 +50,8 @@ class WarmLinear:
 # TODO: here the whole batch is using same rotation, maybe we can use different rotation for each molecule
 def make_random_quaternion(pos):  
     u1, u2, u3 = torch.rand(3).to(pos)
+    import math
+    torch.pi = math.pi
     theta1 = 2 * torch.pi * u1  
     theta2 = 2 * torch.pi * u2  
     r1 = torch.sqrt(1 - u3)  
@@ -101,7 +103,7 @@ class PreprocessBatch:
         if not self.norm2origin and not self.random_rotation:
             return
         pos = batch.pos
-        force = batch.force
+        # force = batch.force
         edge_attr = batch.edge_attr
         if self.norm2origin:
             pos_mean = global_mean_pool(pos, batch.batch)
@@ -110,5 +112,5 @@ class PreprocessBatch:
             pos, force, edge_attr = get_random_rotation_3d(pos, force, edge_attr)
         
         batch.pos = pos
-        batch.force = force
+        # batch.force = force
         batch.edge_attr = edge_attr

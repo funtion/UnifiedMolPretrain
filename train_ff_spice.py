@@ -7,10 +7,12 @@ from torch_geometric.loader import DataLoader
 import torch.optim as optim
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import mean_absolute_error, roc_auc_score
 from tqdm import tqdm
 import numpy as np
 import random
 from pretrain3d.data.spice import SPICE
+from pretrain3d.data.process_matbench import MATBENCH
 from pretrain3d.model.gnn import GNNet
 from torch.optim.lr_scheduler import LambdaLR
 from pretrain3d.utils.misc import WarmCosine, PreprocessBatch
@@ -27,7 +29,7 @@ def train(model, device, loader, optimizer, scheduler, args, preprocessor):
     model.train()
     loss_accum_dict = defaultdict(float)
     loss_log_dict = defaultdict(float)
-    pbar = tqdm(loader, desc="Iteration", disable=args.disable_tqdm)
+    pbar = tqdm(loader, desc="Train Iteration", disable=args.disable_tqdm)
     for step, batch in enumerate(pbar):
         batch = batch.to(device)
         preprocessor.process(batch)
@@ -97,13 +99,17 @@ def evaluate(model, device, loader, args, preprocessor, model_train=False):
     if model_train:
         model.train()
     loss_accum_dict = defaultdict(float)
-    for step, batch in enumerate(tqdm(loader, desc="Valid Iteration", disable=args.disable_tqdm)):
+    target_val, predict_val = [], []
+    pbar = tqdm(loader, desc="Valid Iteration", disable=args.disable_tqdm)
+    for step, batch in enumerate(pbar):
         batch = batch.to(device)
+        target_val.append(batch.target.cpu().detach().numpy())
         preprocessor.process(batch)
         with torch.no_grad(): # we need grad for the force
             loss_accum = 0
             for mode in args.tasks:
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
+                predict_val.append(pred_attrs.squeeze(-1).cpu().detach().numpy())
                 if args.distributed:
                     loss, loss_dict = model.module.compute_loss(
                         pred_attrs,
@@ -124,16 +130,30 @@ def evaluate(model, device, loader, args, preprocessor, model_train=False):
                         args,
                         mode=mode,
                     )
+
                 loss_accum = loss_accum + loss
                 for k, v in loss_dict.items():
                     loss_accum_dict[f"{mode}_{k}"] += v
             
             loss_accum_dict["loss"] += loss_accum.item()
-    
+
+            if step % args.log_interval == 0:
+                description = f"Iteration loss: {loss_accum_dict['loss'] / (step + 1):6.4f}"
+                # mae = mean_absolute_error(batch.target.cpu().detach().numpy(),pred_attrs.squeeze(-1).cpu().detach().numpy())
+                # mae = round(mae, 4)
+                # description += f" MAE: {mae}"
+                pbar.set_description(description)
+
+                # if args.enable_wandb:
+                #     wandb.log({'MAE': mae})
+
     for k in loss_accum_dict.keys():
         loss_accum_dict[k] /= step + 1
     
-    return loss_accum_dict
+    mae = mean_absolute_error(target_val, predict_val)
+    mae = round(mae, 4)
+    print(f"Test dataset MAE: {mae}")
+    return loss_accum_dict, mae, target_val, predict_val
 
 
 def main():
@@ -153,9 +173,9 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--checkpoint-dir", type=str, default="")
+    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
 
-    parser.add_argument("--log-interval", type=int, default=100)
+    parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--encoder-dropout", type=float, default=0.0)
     parser.add_argument("--pooler-dropout", type=float, default=0.0)
@@ -167,6 +187,7 @@ def main():
     parser.add_argument("--period", type=float, default=10)
     parser.add_argument("--enable-tb", action="store_true", default=False)
     parser.add_argument("--enable-wandb", action="store_true", default=False)
+
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--train-subset", action="store_true", default=False)
@@ -184,7 +205,9 @@ def main():
 
     parser.add_argument("--eval-from", type=str, default=None)
     parser.add_argument("--pos-mask-prob", type=float, default=None)
-    parser.add_argument("--tasks", type=str, nargs="*", default=["ff"])
+    # parser.add_argument("--tasks", type=str, nargs="*", default=["matbench"])
+    parser.add_argument("--tasks", type=str, nargs="*", default=["matbench"])
+    parser.add_argument("--dataset_name", type=str, nargs="*", default="matbench_jdft2d")
     parser.add_argument("--restore", action="store_true", default=False)
 
     parser.add_argument('--energy_loss_weight', type=float, default=1.0)
@@ -195,25 +218,34 @@ def main():
 
     args = parser.parse_args()
     args.enable_wandb = "WANDB_API_KEY" in os.environ
+    if args.enable_wandb:  
+        wandb.init(project='matbench',
+                name=f"{args.dataset_name}")
+    # args.enable_wandb = False
 
     init_distributed_mode(args)
     
     assert len(args.tasks) >= 1
-    assert all([task in ["mask", "mol2conf", "conf2mol", "ff"] for task in args.tasks])
+    assert all([task in ["mask", "mol2conf", "conf2mol", "ff", "matbench"] for task in args.tasks])
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
-
     device = torch.device(args.device)
 
-    train_dataset = SPICE(root="./dataset/SPICE", split="train")
-    valid_dataset = SPICE(root="./dataset/SPICE", split="validation")
-    test_dataset = SPICE(root="./dataset/SPICE", split="test")
+    args.tasks = ["matbench"]
+    train_dataset = MATBENCH(root="./dataset/MATBENCH", dataset_name=args.dataset_name, split="train")
+    valid_dataset = MATBENCH(root="./dataset/MATBENCH", dataset_name=args.dataset_name, split="test")
+    
+    # args.tasks = ["ff"]
+    # train_dataset = SPICE(root="./dataset/SPICE", split="train")
+    # valid_dataset = SPICE(root="./dataset/SPICE", split="validation")
+    # test_dataset = SPICE(root="./dataset/SPICE", split="test")
 
     train_size = len(train_dataset)
     valid_size = len(valid_dataset)
-    test_size = len(test_dataset)
+    # test_size = len(test_dataset)
+    print("train size: ", train_size, "test size:", valid_size)
 
     if args.distributed:
         sampler_train = DistributedSampler(train_dataset)
@@ -312,18 +344,6 @@ def main():
         args.enable_wandb = args.rank == 0 and args.enable_wandb
         args.disable_tqdm = args.rank != 0
     
-    # model = torch_geometric.compile(model)
-    
-    if args.enable_wandb:
-        wandb.init(
-            project="unignn_spice",
-            config=args,
-        )
-    
-    print(args)
-    print("train size: ", train_size, "valid size:", valid_size, "test size: ", test_size)
-
-    print(model_without_ddp)
     num_params = sum(p.numel() for p in model_without_ddp.parameters())
     print(f"#Params: {num_params}")
 
@@ -346,23 +366,20 @@ def main():
         tb_writer = SummaryWriter(args.checkpoint_dir)
     
     start_epoch = restore_checkpint["epoch"] if args.restore else 0
+    min_mae = float("inf")
     for epoch in range(start_epoch + 1, args.epochs + 1):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         print("=====Epoch {}".format(epoch))
         print("Training...")
         train_loss_dict = train(
-            model, device, train_loader, optimizer, scheduler, args, train_preprocessor
+            model_without_ddp, device, train_loader, optimizer, scheduler, args, train_preprocessor
         )
         print("Evaluating...")
-        valid_loss_dict = evaluate(model, device, valid_loader, args, valid_preprocessor)
+        valid_loss_dict, mae , target_val, predict_val = evaluate(model_without_ddp, device, valid_loader, args, valid_preprocessor)
 
-        if args.checkpoint_dir:
-            print(f"Setting {os.path.basename(os.path.normpath(args.checkpoint_dir))}...")
-        print(
-            f"Train loss: {train_loss_dict['loss']:6.4f} Valid loss: {valid_loss_dict['loss']:6.4f}"
-        )
-        if args.checkpoint_dir:
+        if mae < min_mae:
+            min_mae = mae
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model_without_ddp.state_dict(),
@@ -370,7 +387,7 @@ def main():
                 "scheduler_state_dict": scheduler.state_dict(),
                 "args": args,
             }
-            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"checkpoint_{epoch}.pt"))
+            # torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"checkpoint_{epoch}.pt"))
             torch.save(checkpoint, restore_fn)
             if args.enable_tb:
                 for k, v in train_loss_dict.items():
@@ -380,6 +397,31 @@ def main():
             if args.enable_wandb:
                 wandb.log({f"train/{k}": v for k, v in train_loss_dict.items()})
                 wandb.log({f"valid/{k}": v for k, v in valid_loss_dict.items()})
+        print(f"Current min MAE: {round(min_mae, 4)}")
+
+        # if args.checkpoint_dir:
+        #     print(f"Setting {os.path.basename(os.path.normpath(args.checkpoint_dir))}...")
+        print(
+            f"Train loss: {train_loss_dict['loss']:6.4f} Valid loss: {valid_loss_dict['loss']:6.4f}"
+        )
+        # if args.checkpoint_dir and epoch % 99 == 0:
+            # checkpoint = {
+            #     "epoch": epoch,
+            #     "model_state_dict": model_without_ddp.state_dict(),
+            #     "optimizer_state_dict": optimizer.state_dict(),
+            #     "scheduler_state_dict": scheduler.state_dict(),
+            #     "args": args,
+            # }
+            # torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"checkpoint_{epoch}.pt"))
+            # torch.save(checkpoint, restore_fn)
+            # if args.enable_tb:
+            #     for k, v in train_loss_dict.items():
+            #         tb_writer.add_scalar(f"train/{k}", v, epoch)
+            #     for k, v in valid_loss_dict.items():
+            #         tb_writer.add_scalar(f"valid/{k}", v, epoch)
+            # if args.enable_wandb:
+            #     wandb.log({f"train/{k}": v for k, v in train_loss_dict.items()})
+            #     wandb.log({f"valid/{k}": v for k, v in valid_loss_dict.items()})
 
     if args.checkpoint_dir and args.enable_tb:
         tb_writer.close()

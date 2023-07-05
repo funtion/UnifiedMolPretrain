@@ -358,6 +358,7 @@ class SelfBN(nn.Module):
 
         self.bns["raw"] = self.bns["mol2conf"]
         self.bns["ff"] = self.bns["mask"]
+        self.bns["matbench"] = self.bns["mask"]
 
     def forward(self, x, mode=None):
         assert mode is not None

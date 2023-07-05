@@ -4,28 +4,55 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        // {
+        //     "name": "Python: Current File",
+        //     "type": "python",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "console": "integratedTerminal",
+        //     "env":{"WANDB_API_KEY":"a1645f5f73193eab34aae47a4375b5aebcd519fb"},
+        //     "justMyCode": true,
+        //     "args": ["--num-layers", "6", "--latent-size","128",
+        //     "--batch-size", "128",
+        //     "--mlp-hidden-size", "512",
+        //     "--node-attn", "--use-bn", "--pred-pos-residual",
+        //     "--random-rotation", 
+        //     "--checkpoint-dir", "./checkpoints/ff_spice_small",
+        //     "--loss_type", "l1", 
+        // ]
+        // },
+
         {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "justMyCode": true
+            "env":{"WANDB_API_KEY":"a1645f5f73193eab34aae47a4375b5aebcd519fb"},
+            "justMyCode": true,
+            "args": ["--num-layers","12", "--batch-size", "16", 
+            // "--enable-tb",
+            "--node-attn", "--use-bn", "--pred-pos-residual", "--mask-prob", "0.25"
+        ]
         },
-        {
-            "name": "Python: Debug Train FF",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/train_ff.py",
-            "console": "integratedTerminal",
-            "args": [
-                "--checkpoint-dir",
-                "${workspaceFolder}/checkpoints/ff",
-                "--num-layers", "3",
-                "--batch-size", "128",
-                "--node-attn", "--use-bn", "--pred-pos-residual", "--random-rotation",
-                "--task", "ff"
-            ]
-        }
+
+
+
+
+        // {
+        //     "name": "Python: Debug Train FF",
+        //     "type": "python",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/train_ff_spice.py",
+        //     "console": "integratedTerminal",
+        //     "args": [
+        //         "--checkpoint-dir",
+        //         "${workspaceFolder}/checkpoints/ff",
+        //         "--num-layers", "3",
+        //         "--batch-size", "128",
+        //         "--node-attn", "--use-bn", "--pred-pos-residual", "--random-rotation",
+        //         "--task", "ff"
+        //     ]
+        // }
     ]
 }
