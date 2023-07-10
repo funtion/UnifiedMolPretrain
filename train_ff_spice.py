@@ -366,8 +366,8 @@ def main():
         tb_writer = SummaryWriter(args.checkpoint_dir)
     
     start_epoch = restore_checkpint["epoch"] if args.restore else 0
-    min_mae = float("inf")
-    for epoch in range(start_epoch + 1, args.epochs + 1):
+    min_mae = restore_checkpint["min_mae"] if args.restore else float("inf")
+    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         print("=====Epoch {}".format(epoch))
@@ -386,6 +386,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "args": args,
+                "min_mae": min_mae
             }
             # torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"checkpoint_{epoch}.pt"))
             torch.save(checkpoint, restore_fn)
