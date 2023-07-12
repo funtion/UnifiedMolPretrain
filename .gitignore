@@ -1,6 +1,7 @@
 checkpoints/
 dataset/
 __pycache__/
+.vscode
 *egg-info/
 wandb/
 model/
