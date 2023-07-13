@@ -461,8 +461,12 @@ class GNNet(nn.Module):
             return self.compute_ff_loss(
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
             )
-        elif mode == "matbench":
+        elif mode == "matbench"  and not args.classification:
             return self.compute_matbench_loss(
+                pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
+            )
+        elif mode == "matbench"  and args.classification:
+            return self.compute_matbench_BCEloss(
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args
             )
         else:
@@ -471,11 +475,12 @@ class GNNet(nn.Module):
     def compute_ff_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
     ):
-        gt_energy = batch.energy / batch.n_nodes        
+        gt_energy = batch.energy / batch.n_nodes    
+        # gt_energy = batch.energy      
         gt_force = batch.force
         
         pred_energy = pred_attrs.squeeze(-1) / batch.n_nodes
-        
+        # pred_energy = pred_attrs.squeeze(-1) 
         energy_l1 = F.l1_loss(pred_energy, gt_energy, reduction="mean")
         energy_l2 = F.mse_loss(pred_energy, gt_energy, reduction="mean")
         energy_huber = F.huber_loss(pred_energy, gt_energy, reduction="mean", delta=args.huber_delta)
@@ -519,11 +524,12 @@ class GNNet(nn.Module):
     def compute_matbench_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
     ):
-        gt_energy = batch.target / batch.n_nodes        
+        # gt_energy = batch.target / batch.n_nodes  
+        gt_energy = batch.target      
         # gt_force = batch.force
         
-        pred_energy = pred_attrs.squeeze(-1) / batch.n_nodes
-        
+        # pred_energy = pred_attrs.squeeze(-1) / batch.n_nodes
+        pred_energy = pred_attrs.squeeze(-1)
         energy_l1 = F.l1_loss(pred_energy, gt_energy, reduction="mean")
         energy_l2 = F.mse_loss(pred_energy, gt_energy, reduction="mean")
         energy_huber = F.huber_loss(pred_energy, gt_energy, reduction="mean", delta=args.huber_delta)
@@ -544,6 +550,18 @@ class GNNet(nn.Module):
         
         return loss, loss_dict
 
+    def compute_matbench_BCEloss(
+        self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
+    ):
+        ground_truth = batch.target      
+        predictions = pred_attrs.squeeze(-1)
+        loss_fn = torch.nn.BCEWithLogitsLoss(weight=None, reduction='mean', pos_weight=None)
+        loss = loss_fn(ground_truth, predictions)
+        loss_dict = {
+            'BCE_loss': loss.item()
+        }
+        
+        return loss, loss_dict
 
     def compute_mask_loss(
         self, pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx, batch, args,
