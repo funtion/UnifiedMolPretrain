@@ -30,9 +30,13 @@
             "console": "integratedTerminal",
             "env":{"WANDB_API_KEY":"a1645f5f73193eab34aae47a4375b5aebcd519fb"},
             "justMyCode": true,
-            "args": ["--num-layers","12", "--batch-size", "16", 
+            "args": [
+                // "--num-layers","12", "--batch-size", "16", 
             // "--enable-tb",
-            "--node-attn", "--use-bn", "--pred-pos-residual", "--mask-prob", "0.25"
+            "--normalize",
+            "--node-attn", "--use-bn", 
+            // "--pred-pos-residual", 
+            // "--mask-prob", "0.25"
         ]
         },
 
