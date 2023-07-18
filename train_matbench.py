@@ -199,7 +199,7 @@ def main():
     parser.add_argument("--pos-mask-prob", type=float, default=None)
     # parser.add_argument("--tasks", type=str, nargs="*", default=["matbench"])
     parser.add_argument("--tasks", type=str, nargs="*", default=["matbench"])
-    parser.add_argument("--dataset_name", type=str, nargs="*", default="matbench_jdft2d")
+    parser.add_argument("--dataset_name", type=str, default="matbench_jdft2d")
     parser.add_argument("--restore", action="store_true", default=False)
 
     parser.add_argument('--energy_loss_weight', type=float, default=1.0)
@@ -208,6 +208,7 @@ def main():
     parser.add_argument('--loss_type', type=str, default='huber')
     parser.add_argument('--huber-delta', type=float, default=0.01)
     parser.add_argument("--normalize", action="store_true", default=False)
+    parser.add_argument("--task", action="store_true", default=False)
 
     args = parser.parse_args()
     args.enable_wandb = "WANDB_API_KEY" in os.environ
@@ -227,10 +228,13 @@ def main():
     torch.cuda.manual_seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
+ 
+    print(args.dataset_name)
 
     matbench = MatbenchBenchmark(
             autoload=False,
             subset=[
+                f"{args.dataset_name}"
                 # "matbench_jdft2d",
                 # "matbench_dielectric",
                 # "matbench_phonons",
@@ -239,7 +243,7 @@ def main():
                 # "matbench_log_kvrh",
                 # "matbench_mp_e_form",
                 # "matbench_mp_gap",
-                "matbench_mp_is_metal",
+                # "matbench_mp_is_metal",
             ],
         )
     
