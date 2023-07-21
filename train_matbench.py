@@ -8,6 +8,7 @@ from torch_geometric.loader import DataLoader
 import torch.optim as optim
 from torch import nn
 import datetime
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import mean_absolute_error, roc_auc_score
 from tqdm import tqdm
@@ -26,6 +27,7 @@ from matbench.bench import MatbenchBenchmark
 from matbench.constants import CLF_KEY
 from sklearn.preprocessing import StandardScaler
 import wandb
+from pathlib import Path
 
 
 # torch.set_float32_matmul_precision('high')
@@ -103,7 +105,7 @@ def evaluate(model, scaler, device, loader, args, preprocessor, model_train=Fals
                 pred_attrs, attr_mask_index, pos_predictions, pos_mask_idx = model(batch, mode=mode)
                 if normalize:
                     pred_attrs = scaler.inverse_transform(pred_attrs.squeeze(-1).cpu().detach().numpy().reshape(-1,1))
-                    predict_vals.extend(pred_attrs)
+                    predict_vals.extend(pred_attrs.squeeze(-1))
                 else:
                     predict_vals.extend(pred_attrs.squeeze(-1).cpu().detach().numpy())
                 
@@ -137,14 +139,8 @@ def evaluate(model, scaler, device, loader, args, preprocessor, model_train=Fals
     for k in loss_accum_dict.keys():
         loss_accum_dict[k] /= step + 1
     
-    mae, roc_aucs = [], []
-    if not args.classification:
-        mae = mean_absolute_error(target_vals, predict_vals)
-        print(f"Test dataset MAE: {mae}")
-    else:
-        roc = roc_auc_score(target_vals,predict_vals)
-        print(f"Test dataset ROC: {roc}")
-    return loss_accum_dict, mae, roc, target_vals, predict_vals
+    
+    return loss_accum_dict, target_vals, predict_vals
 
 
 
@@ -166,6 +162,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
+    parser.add_argument("--results_dir", type=str, default="./results")
 
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -211,6 +208,7 @@ def main():
     parser.add_argument("--task", action="store_true", default=False)
 
     args = parser.parse_args()
+    os.environ["WANDB_API_KEY"] = "a1645f5f73193eab34aae47a4375b5aebcd519fb"
     args.enable_wandb = "WANDB_API_KEY" in os.environ
     args.enable_wandb = False
     if args.enable_wandb:  
@@ -247,55 +245,7 @@ def main():
             ],
         )
     
-    for task in matbench.tasks:
-        task.load()
-        args.classification = (task.metadata["task_type"] == "classification")
-        maes, roc_aucs = [], []  # mean absolute error
-        for i, fold in enumerate(task.folds):
-            train_df = task.get_train_and_val_data(fold, as_type="df")
-            test_df = task.get_test_data(fold, include_target=True, as_type="df")
-            target = [ col for col in train_df.columns
-                            if col not in ("id", "structure", "composition")
-                            ][0]  
-            
-            scaler = StandardScaler()
-            if args.normalize and not args.classification:
-                train_df[target] = scaler.fit_transform(train_df[target].to_numpy().reshape(-1,1))
-            
-            if args.classification:  # is_metal
-                train_df["is_metal"] = train_df["is_metal"].astype(int)
-                test_df["is_metal"] = test_df["is_metal"].astype(int)
-
-            # dataset preprocessing
-            train_df =  train_df[:500]
-            test_df = test_df[:128]
-            train_dataset = MATBENCH(root=f"./dataset/MATBENCH/{task.dataset_name}/fold_{fold}", 
-                                        data=train_df, target=target, split="train")
-            test_dataset = MATBENCH(root=f"./dataset/MATBENCH/{task.dataset_name}/fold_{fold}", 
-                                    data=test_df, target=target, split="test")
-
-            
-            train_size = len(train_dataset)
-            test_size = len(test_dataset)
-            print(f"Dataset: {task.dataset_name}_fold_{fold} \n" 
-                    "train size:", train_size, "test size:", test_size, "target:", target)
-            
-            if args.distributed:
-                sampler_train = DistributedSampler(train_dataset)
-            else:
-                sampler_train = torch.utils.data.RandomSampler(train_dataset)
-
-            batch_sampler_train = torch.utils.data.BatchSampler(
-                sampler_train, args.batch_size, drop_last=True
-            )
-            train_loader = DataLoader(
-                train_dataset, batch_sampler=batch_sampler_train, num_workers=args.num_workers
-            )
-            test_loader = DataLoader(
-                test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
-            )
-
-            shared_params = dict(
+    shared_params = dict(
                 mlp_hidden_size=args.mlp_hidden_size,
                 mlp_layers=args.mlp_layers,
                 latent_size=args.latent_size,
@@ -324,141 +274,196 @@ def main():
                 num_tasks=1 # Energy only. Forece is computed in backward
             )
 
-            model = GNNet(**shared_params).to(device)
-            
-            train_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=args.random_rotation)
-            test_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=False)
-            
-            args.disable_tqdm = False
-            if args.eval_from is not None:
-                assert os.path.exists(args.eval_from)
-                checkpoint = torch.load(args.eval_from, map_location=torch.device("cpu"))[
-                    "model_state_dict"
-                ]
-                model.load_state_dict(checkpoint)
 
-                print("model train")
-                train_loss_dict = evaluate(
-                    model, device, train_loader, args, train_preprocessor, model_train=True
-                )
-                print("train", json.dumps(train_loss_dict))
-                valid_loss_dict = evaluate(
-                    model, device, test_loader, args, test_preprocessor, model_train=True
-                )
-                print("valid", json.dumps(valid_loss_dict))
+    for task in matbench.tasks:
+        save_path = args.results_dir + f"/{task.dataset_name}"
+        os.makedirs(save_path, exist_ok=True)
 
-                print("model eval")
-                train_loss_dict = evaluate(model, device, train_loader, args, train_preprocessor)
-                print("train", json.dumps(train_loss_dict))
-                valid_loss_dict = evaluate(model, device, test_loader, args, test_preprocessor)
-                print("valid", json.dumps(valid_loss_dict))
+        task.load()
+        args.classification = (task.metadata["task_type"] == "classification")
+        maes, roc_aucs = [], [] 
 
-                exit(0)
-
-            restore_fn = os.path.join(args.checkpoint_dir, "checkpoint_last.pt")
-            if args.restore:
-                if os.path.exists(restore_fn):
-                    print(f"Restore from {restore_fn}")
-                    restore_checkpint = torch.load(restore_fn, map_location=torch.device("cpu"))
-                    model.load_state_dict(restore_checkpint["model_state_dict"])
-                else:
-                    args.restore = False
-
-            model_without_ddp = model
-            if args.distributed:
-                model = torch.nn.parallel.DistributedDataParallel(
-                    model,
-                    device_ids=[args.local_rank],
-                    broadcast_buffers=False,
-                    find_unused_parameters=True,
-                )
-                args.checkpoint_dir = "" if args.rank != 0 else args.checkpoint_dir
-                args.enable_tb = False if args.rank != 0 else args.enable_tb
-                args.enable_wandb = args.rank == 0 and args.enable_wandb
-                args.disable_tqdm = args.rank != 0
-            
-            num_params = sum(p.numel() for p in model_without_ddp.parameters())
-            print(f"#Params: {num_params}")
-
-            optimizer = optim.AdamW(
-                model_without_ddp.parameters(),
-                lr=args.lr,
-                betas=(0.9, args.beta2),
-                weight_decay=args.weight_decay,
-            )
-            lrscheduler = WarmCosine(tmax=len(train_loader) * args.period, warmup=int(4e3))
-            scheduler = LambdaLR(optimizer, lambda x: lrscheduler.step(x))
-            if args.restore:
-                optimizer.load_state_dict(restore_checkpint["optimizer_state_dict"])
-                scheduler.load_state_dict(restore_checkpint["scheduler_state_dict"])
-
-            if args.checkpoint_dir:
-                os.makedirs(args.checkpoint_dir, exist_ok=True)
-
-            if args.checkpoint_dir and args.enable_tb:
-                tb_writer = SummaryWriter(args.checkpoint_dir)
-            
-            start_epoch = restore_checkpint["epoch"] if args.restore else 0
-            min_mae = restore_checkpint["min_mae"] if args.restore else float("inf")
-            min_roc = restore_checkpint["min_roc"] if args.restore else float("inf")
-            for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
-                if args.distributed:
-                    sampler_train.set_epoch(epoch)
-                print("=====Epoch {}".format(epoch))
-                print("Training...")
-                train_loss_dict = train(model_without_ddp, device, train_loader, optimizer, scheduler, args, train_preprocessor)
-                if args.enable_wandb:
-                    for k, v in train_loss_dict.items():
-                        wandb.log({f"training/{k}": v })
-
-                if epoch % 10 == 0:
-                    print("Evaluating...")
-                    valid_loss_dict, mae, roc, target_val, predict_val = evaluate(model_without_ddp, scaler, device, test_loader, args, test_preprocessor, normalize=args.normalize)
-                    print(
-                        f"Train loss: {train_loss_dict['loss']:6.4f} Valid loss: {valid_loss_dict['loss']:6.4f}"
-                    )
-
-                    if not args.classification:
-                        if args.enable_wandb:
-                            wandb.log({"MAE": mae })
-                        if mae < min_mae:
-                            min_mae = mae
-                            min_epoch = epoch
-                            checkpoint = {
-                                "epoch": epoch,
-                                "model_state_dict": model_without_ddp.state_dict(),
-                                "optimizer_state_dict": optimizer.state_dict(),
-                                "scheduler_state_dict": scheduler.state_dict(),
-                                "args": args,
-                                "min_mae": min_mae
-                            }
-                            torch.save(checkpoint, restore_fn)
-                        print(f"Current min MAE: {round(min_mae, 4)} at epoch {min_epoch}")
-                    else:
-                        if args.enable_wandb:
-                            wandb.log({"ROC": roc })
-                        if roc < min_roc:
-                            min_roc = roc
-                            min_epoch = epoch
-                            checkpoint = {
-                                "epoch": epoch,
-                                "model_state_dict": model_without_ddp.state_dict(),
-                                "optimizer_state_dict": optimizer.state_dict(),
-                                "scheduler_state_dict": scheduler.state_dict(),
-                                "args": args,
-                                "min_roc": min_roc
-                            }
-                            torch.save(checkpoint, restore_fn)
-                        print(f"Current min ROC: {round(min_roc, 4)} at epoch {min_epoch}")
-       
-            print("Finished traning!")
-            print("Testing...")
-            valid_loss_dict, mae, roc, target_val, predict_val = evaluate(model_without_ddp, scaler, device, test_loader, args, test_preprocessor, normalize=args.normalize)
-                    
-            if not args.classification:
-               maes.append(mae)
+        for fold in task.folds:
+            # if fold==1:
+            #     break
+            intermediate_results_ = save_path + f"/fold_{fold}_targets_predictions.csv" 
+            if os.path.exists(intermediate_results_):
+                # If there are already intermediate results stored, skip the training.
+                print('Load intermediate results')
+                df = pd.read_csv(intermediate_results_)
+                target_vals = df.target_vals.values
+                predict_vals = df.predict_vals.values
+                
             else:
-               roc_aucs.append(roc)
+                train_df = task.get_train_and_val_data(fold, as_type="df")
+                test_df = task.get_test_data(fold, include_target=True, as_type="df")
+                target = [ col for col in train_df.columns
+                                if col not in ("id", "structure", "composition")
+                                ][0]  
+                
+                scaler = StandardScaler()
+                if args.normalize and not args.classification:
+                    train_df[target] = scaler.fit_transform(train_df[target].to_numpy().reshape(-1,1))
+                
+                if args.classification:  # is_metal
+                    train_df["is_metal"] = train_df["is_metal"].astype(int)
+                    test_df["is_metal"] = test_df["is_metal"].astype(int)
+
+                # dataset preprocessing
+                # train_df =  train_df[:500]
+                # test_df = test_df[:128]
+                train_dataset = MATBENCH(root=f"./dataset/MATBENCH/{task.dataset_name}/fold_{fold}", 
+                                            data=train_df, target=target, split="train")
+                test_dataset = MATBENCH(root=f"./dataset/MATBENCH/{task.dataset_name}/fold_{fold}", 
+                                        data=test_df, target=target, split="test")
+
+                
+                train_size = len(train_dataset)
+                test_size = len(test_dataset)
+                print(f"Dataset: {task.dataset_name}_fold_{fold} \n" 
+                        "train size:", train_size, "test size:", test_size, "target:", target)
+                
+                if args.distributed:
+                    sampler_train = DistributedSampler(train_dataset)
+                else:
+                    sampler_train = torch.utils.data.RandomSampler(train_dataset)
+
+                batch_sampler_train = torch.utils.data.BatchSampler(
+                    sampler_train, args.batch_size, drop_last=True
+                )
+                train_loader = DataLoader(
+                    train_dataset, batch_sampler=batch_sampler_train, num_workers=args.num_workers
+                )
+                test_loader = DataLoader(
+                    test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+                )
+
+                
+                model = GNNet(**shared_params).to(device)
+                
+                train_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=args.random_rotation)
+                test_preprocessor = PreprocessBatch(norm2origin=True, random_rotation=False)
+                
+                args.disable_tqdm = False
+                if args.eval_from is not None:
+                    assert os.path.exists(args.eval_from)
+                    checkpoint = torch.load(args.eval_from, map_location=torch.device("cpu"))[
+                        "model_state_dict"
+                    ]
+                    model.load_state_dict(checkpoint)
+
+                    print("model train")
+                    train_loss_dict = evaluate(
+                        model, device, train_loader, args, train_preprocessor, model_train=True
+                    )
+                    print("train", json.dumps(train_loss_dict))
+                    valid_loss_dict = evaluate(
+                        model, device, test_loader, args, test_preprocessor, model_train=True
+                    )
+                    print("valid", json.dumps(valid_loss_dict))
+
+                    print("model eval")
+                    train_loss_dict = evaluate(model, device, train_loader, args, train_preprocessor)
+                    print("train", json.dumps(train_loss_dict))
+                    valid_loss_dict = evaluate(model, device, test_loader, args, test_preprocessor)
+                    print("valid", json.dumps(valid_loss_dict))
+
+                    exit(0)
+
+                restore_fn = os.path.join(args.checkpoint_dir, "checkpoint_last.pt")
+                if args.restore:
+                    if os.path.exists(restore_fn):
+                        print(f"Restore from {restore_fn}")
+                        restore_checkpint = torch.load(restore_fn, map_location=torch.device("cpu"))
+                        model.load_state_dict(restore_checkpint["model_state_dict"])
+                    else:
+                        args.restore = False
+
+                model_without_ddp = model
+                if args.distributed:
+                    model = torch.nn.parallel.DistributedDataParallel(
+                        model,
+                        device_ids=[args.local_rank],
+                        broadcast_buffers=False,
+                        find_unused_parameters=True,
+                    )
+                    args.checkpoint_dir = "" if args.rank != 0 else args.checkpoint_dir
+                    args.enable_tb = False if args.rank != 0 else args.enable_tb
+                    args.enable_wandb = args.rank == 0 and args.enable_wandb
+                    args.disable_tqdm = args.rank != 0
+                
+                num_params = sum(p.numel() for p in model_without_ddp.parameters())
+                print(f"#Params: {num_params}")
+
+                optimizer = optim.AdamW(
+                    model_without_ddp.parameters(),
+                    lr=args.lr,
+                    betas=(0.9, args.beta2),
+                    weight_decay=args.weight_decay,
+                )
+                lrscheduler = WarmCosine(tmax=len(train_loader) * args.period, warmup=int(4e3))
+                scheduler = LambdaLR(optimizer, lambda x: lrscheduler.step(x))
+                if args.restore:
+                    optimizer.load_state_dict(restore_checkpint["optimizer_state_dict"])
+                    scheduler.load_state_dict(restore_checkpint["scheduler_state_dict"])
+
+                if args.checkpoint_dir:
+                    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
+                if args.checkpoint_dir and args.enable_tb:
+                    tb_writer = SummaryWriter(args.checkpoint_dir)
+                
+                start_epoch = restore_checkpint["epoch"] if args.restore else 0
+                min_mae = restore_checkpint["min_mae"] if args.restore else float("inf")
+                min_roc = restore_checkpint["min_roc"] if args.restore else float("inf")
+                
+                
+                for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
+                    if args.distributed:
+                        sampler_train.set_epoch(epoch)
+                    print("=====Epoch {}".format(epoch))
+                    print("Training...")
+                    train_loss_dict = train(model_without_ddp, device, train_loader, optimizer, scheduler, args, train_preprocessor)
+                    if args.enable_wandb:
+                        for k, v in train_loss_dict.items():
+                            wandb.log({f"fold_{fold}_training/{k}": v })
+
+                    if epoch % 10 == 0:
+                        print("Evaluating...")
+                        valid_loss_dict, target_vals, predict_vals = evaluate(model_without_ddp, scaler, device, test_loader, args, test_preprocessor, normalize=args.normalize)
+                        print(
+                            f"Train loss: {train_loss_dict['loss']:6.4f} Valid loss: {valid_loss_dict['loss']:6.4f}"
+                        )
+
+                        if not args.classification:
+                            eval_mae = mean_absolute_error(target_vals, predict_vals)
+                            if args.enable_wandb:
+                                wandb.log({f"fold_{fold}_MAE": eval_mae})
+                            print(f"Current MAE: {round(eval_mae, 4)} at epoch {epoch}")
+                        else:
+                            eval_roc = roc_auc_score(target_vals,predict_vals)
+                            if args.enable_wandb:
+                                wandb.log({f"fold_{fold}_ROC": eval_roc})
+                            print(f"Current ROC: {round(eval_roc, 4)} at epoch {epoch}")
+        
+                print("Finished traning!")
+                print("Testing...")
+                valid_loss_dict, target_vals, predict_vals = evaluate(model_without_ddp, scaler, device, test_loader, args, test_preprocessor, normalize=args.normalize)
+                vals = list(zip(target_vals, predict_vals))
+                df3 = pd.DataFrame(data=vals, columns=['target_vals', 'predict_vals'])
+                df3.to_csv(intermediate_results_, index=False)
+
+            if not args.classification:
+                mae = mean_absolute_error(target_vals, predict_vals)
+                maes.append(mae)
+                print(f"{args.dataset_name}_fold_{fold} test dataset MAE: {mae}")
+            else:
+                roc = roc_auc_score(target_vals,predict_vals)
+                roc_aucs.append(roc)
+                print(f"{args.dataset_name}_fold_{fold} test dataset ROC: {roc}")
+
+            task.record(fold, predict_vals, params=shared_params)
+                    
 
         
         # Result 
