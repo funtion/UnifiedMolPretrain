@@ -61,8 +61,8 @@ def process_sinlge(args):
     G.add_nodes_from(range(data.num_nodes))
     G.add_edges_from(edge_index.t().tolist())
 
-    edge_index = torch.cat((edge_index,  torch.from_numpy(np.array([receive_index, sent_index]))), dim=1)
-    edge_attr = torch.cat((edge_attr, -edge_attr),dim=0)
+    # edge_index = torch.cat((edge_index,  torch.from_numpy(np.array([receive_index, sent_index]))), dim=1)
+    # edge_attr = torch.cat((edge_attr, -edge_attr),dim=0)
     # print(edge_attr[:5])
     # print(edge_attr[120:126])
     # edges_list = []
