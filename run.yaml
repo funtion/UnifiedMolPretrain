@@ -1,0 +1,43 @@
+description: MatbenchExperiment
+
+target:
+  # service: aml
+  # name: npc
+  service: sing
+  name: msrresrchvc
+  # service: amlk8s
+  # # run "amlt target list amlk8s" to list the names of available AMLK8s targets
+  # name: itpseasiav100cl
+  # vc: resrchvc
+
+storage:
+  output:
+    storage_account_name: matkin
+    container_name: sdh
+    mount_dir: /mnt/data
+
+
+environment:
+  image: amlt-sing/pytorch-1.11.0-cuda11.6  
+  setup: 
+    - conda env create -f freeze.yml
+    - source activate pretrainmol3d
+    - conda activate pretrainmol3d
+
+
+code:
+  local_dir: $CONFIG_DIR
+  ignore:
+  - dataset/*
+  
+
+
+jobs:
+- name: matbench_jdft2d
+  sku: 24G2-P40
+  sla_tier: Premium
+  priority: high
+  command:
+  -  python train_matbench.py --normalize
+   --dataset_name="matbench_jdft2d" --device="cuda:0" --node-attn --use-bn --batch-size=64
+   --results_dir="/mnt/datad"
