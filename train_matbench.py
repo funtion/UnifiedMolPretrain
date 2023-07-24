@@ -310,7 +310,7 @@ def main():
                     test_df["is_metal"] = test_df["is_metal"].astype(int)
 
                 # dataset preprocessing
-                # train_df =  train_df[:500]
+                # train_df =  train_df[:500]  # 
                 # test_df = test_df[:128]
                 train_dataset = MATBENCH(root=f"./dataset/MATBENCH/{task.dataset_name}/fold_{fold}", 
                                             data=train_df, target=target, split="train")
